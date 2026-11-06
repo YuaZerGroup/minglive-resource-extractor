@@ -1,5 +1,18 @@
 name: Build unsigned IPA
 
+# NOTE ON RUNNERS
+# --------------
+# An iOS `.app` bundle can only be produced by Apple's toolchain, so this
+# workflow requires a macOS runner. Public/`macos-*` hosted runners are subject
+# to the account's macOS minute quota; when that quota is unavailable the job is
+# cancelled before any step runs (the run shows `steps: []` and an empty
+# runner_name).
+#
+# `MACOS_RUNNER` lets the build target a self-hosted macOS machine instead:
+#   Settings -> Secrets and variables -> Actions -> Variables
+#   MACOS_RUNNER = self-hosted   (label of a registered macOS runner)
+# Leave it unset to use the hosted `macos-14` image.
+
 on:
   push:
     branches: [main]
@@ -15,31 +28,44 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  FLUTTER_VERSION: ${{ github.event.inputs.flutter_version || '3.24.5' }}
-  FLUTTER_CHANNEL: stable
-
 jobs:
   build:
     name: Build Runner.app and package unsigned IPA
-    # The project carries ~364 MiB of slice assets, so the default 3x runner
-    # disk is tight. macOS runners ship with an arm64 toolchain that Flutter
-    # needs for the iOS 13 deployment target.
-    runs-on: macos-14
-    timeout-minutes: 90
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-14' }}
+    timeout-minutes: 120
+    env:
+      FLUTTER_VERSION: ${{ inputs.flutter_version || '3.24.5' }}
+      FLUTTER_CHANNEL: stable
     steps:
+      - name: Confirm runner platform
+        run: |
+          uname -a
+          sw_vers || true
+          xcodebuild -version || true
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          lfs: false
+          lfs: true
 
-      - name: Show workspace size
+      - name: Verify LFS payload unpacked
         run: |
-          echo "repo size:"
-          du -sh . || true
-          echo "slice assets:"
-          du -sh assets/builtin-slices || true
-          find assets/builtin-slices -type f | wc -l
+          set -euo pipefail
+          count=$(find assets/builtin-slices -name '*.part' -type f | wc -l | tr -d ' ')
+          echo "slice files: $count"
+          if [ "$count" -ne 340 ]; then
+            echo "::error::expected 340 slice files, found $count — Git LFS objects were not fetched"
+            exit 1
+          fi
+          # A pointer file is ~130 bytes; a real slice is much larger.
+          smallest=$(find assets/builtin-slices -name '*.part' -type f -printf '%s\n' \
+            | sort -n | head -n 1)
+          echo "smallest slice: ${smallest} bytes"
+          if [ "$smallest" -lt 1000 ]; then
+            echo "::error::found LFS pointer files instead of payload; run 'git lfs pull'"
+            exit 1
+          fi
+          du -sh assets/builtin-slices
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -47,26 +73,14 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: ${{ env.FLUTTER_CHANNEL }}
           cache: true
-          cache-key: flutter-${{ env.FLUTTER_VERSION }}
 
       - name: Flutter doctor
         run: flutter doctor -v
 
       - name: Regenerate asset manifest
-        # Flutter needs every slice listed individually. The generator rewrites
-        # the `assets:` block of pubspec.yaml from whatever is on disk, so a
-        # partial checkout still produces a consistent manifest.
         run: |
           dart tool/gen_asset_manifest.dart
-          echo "--- asset entry count ---"
-          grep -c '^    - assets/' pubspec.yaml
-
-      - name: Verify manifest is committed
-        run: |
-          if ! git diff --quiet -- pubspec.yaml; then
-            echo "::warning::pubspec.yaml asset manifest differed from the committed copy and was regenerated"
-            git --no-pager diff --stat -- pubspec.yaml
-          fi
+          echo "asset entries: $(grep -c '^    - assets/' pubspec.yaml)"
 
       - name: Install dependencies
         run: flutter pub get
@@ -79,34 +93,27 @@ jobs:
 
       - name: Install CocoaPods dependencies
         working-directory: ios
-        run: |
-          pod --version
-          pod install --repo-update
+        run: pod install --repo-update
 
       - name: Build iOS release (no codesign)
-        # `--no-codesign` is what makes the output unsigned; there is no
-        # certificate or provisioning profile in CI and none is wanted.
         run: |
-          flutter build ios \
-            --release \
-            --no-codesign \
-            --no-tree-shake-icons \
-            --verbose 2>&1 | tail -n 200
+          set -o pipefail
+          flutter build ios --release --no-codesign 2>&1 | tail -n 250
 
-      - name: Verify the built app bundle
+      - name: Verify the app bundle
         run: |
           set -euo pipefail
           APP=build/ios/iphoneos/Runner.app
-          test -d "$APP" || { echo "missing $APP"; exit 1; }
+          test -d "$APP" || { echo "::error::missing $APP"; exit 1; }
           echo "app size: $(du -sh "$APP" | cut -f1)"
-          echo "--- bundle layout ---"
-          ls -la "$APP" | head -n 40
-          echo "--- flutter assets ---"
-          du -sh "$APP/Frameworks/App.framework/flutter_assets" || true
-          echo "--- slice count inside the bundle ---"
-          find "$APP/Frameworks/App.framework/flutter_assets/assets/builtin-slices" \
-            -name '*.part' | wc -l || echo "0"
-          echo "--- codesign status (expect: not signed) ---"
+          echo "--- executable ---"
+          file "$APP/Runner"
+          echo "--- slices inside the bundle ---"
+          n=$(find "$APP/Frameworks/App.framework/flutter_assets/assets/builtin-slices" \
+                -name '*.part' | wc -l | tr -d ' ')
+          echo "bundled slices: $n"
+          test "$n" -eq 340 || { echo "::error::expected 340 bundled slices, got $n"; exit 1; }
+          echo "--- signing status (unsigned is expected) ---"
           codesign -dv "$APP" 2>&1 || echo "unsigned (expected)"
 
       - name: Package unsigned IPA
@@ -117,8 +124,6 @@ jobs:
           rm -rf "$OUT"; mkdir -p "$OUT/Payload"
           cp -R "$APP" "$OUT/Payload/Runner.app"
           cd "$OUT"
-          # 7z keeps very large members more reliably than `zip` on the runner,
-          # and it is preinstalled on macOS images.
           zip -qry -y MingLiveExtractor-unsigned.ipa Payload
           ls -lh MingLiveExtractor-unsigned.ipa
           shasum -a 256 MingLiveExtractor-unsigned.ipa \
@@ -128,14 +133,13 @@ jobs:
         run: |
           set -euo pipefail
           IPA=build/ipa/MingLiveExtractor-unsigned.ipa
-          echo "--- archive listing (first 20) ---"
-          unzip -l "$IPA" | head -n 20
-          echo "--- entry count ---"
-          unzip -l "$IPA" | tail -n 1
-          echo "--- confirm the embedded binary exists ---"
-          unzip -l "$IPA" | grep -c 'Payload/Runner.app/Runner' || exit 1
-          echo "--- confirm slices are inside ---"
-          unzip -l "$IPA" | grep -c 'builtin-slices/.*\.part' || exit 1
+          unzip -l "$IPA" | head -n 15
+          echo "--- checks ---"
+          unzip -l "$IPA" | grep -q 'Payload/Runner.app/Runner' \
+            || { echo "::error::Runner binary missing from IPA"; exit 1; }
+          n=$(unzip -l "$IPA" | grep -c 'builtin-slices/.*\.part' || true)
+          echo "slices in IPA: $n"
+          test "$n" -eq 340 || { echo "::error::expected 340 slices in IPA, got $n"; exit 1; }
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4

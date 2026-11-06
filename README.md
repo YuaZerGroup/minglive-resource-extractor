@@ -219,6 +219,8 @@ flutter test
 
 ### 4.3 构建未签名 IPA
 
+**方式 A：GitHub Actions**
+
 推送到 `main` 或手动触发：
 
 ```
@@ -227,11 +229,37 @@ Actions → Build unsigned IPA → Run workflow
 
 产物：`MingLiveExtractor-unsigned.ipa` + `.sha256`，**未签名**，自签你自己来。
 
-- 运行器：`macos-14`
+- 运行器：`macos-14`（可用仓库变量 `MACOS_RUNNER` 改成 self-hosted 标签）
 - Flutter：`3.24.5`（可 `workflow_dispatch` 时改）
 - 构建命令：`flutter build ios --release --no-codesign`
 - 打包：`Payload/Runner.app` → zip → `.ipa`
-- 校验步骤会检查 binary 存在、切片数量、签名状态
+- 校验步骤会检查 binary 存在、切片数量必须等于 340、签名状态
+
+> **关于 macOS runner 配额**
+>
+> iOS 的 `.app` 只能由 Apple 工具链产出，所以这个 workflow 必须跑在 macOS 上。`macos-*` 托管镜像受账户 macOS 分钟配额限制，配额不可用时作业会在**任何步骤执行前**被取消——表现就是 `conclusion: cancelled`、`runner_name` 为空、`steps: []`、日志 zip 只有一个空 `PK` 头。
+>
+> 实测过同一份 workflow：`ubuntu-latest` 作业正常拿到 runner 并成功，`macos-14` 作业被取消。所以看到这类取消不是构建失败，是配额/账单问题。
+>
+> 两条出路：
+> 1. 给自己的 macOS 机器注册 self-hosted runner，把仓库变量 `MACOS_RUNNER` 设成它的标签
+> 2. 直接在 Mac 上本地构建（见方式 B）
+
+**方式 B：本地一键出包（推荐，绕开配额）**
+
+```bash
+./tool/build-ipa.sh                 # 完整构建 + 打包
+./tool/build-ipa.sh --skip-tests    # 跳过测试，快一点
+```
+
+这个脚本和 CI 做的是**完全一样**的事：检查 LFS 完整性 → 生成 assets 清单 → `pub get` → `analyze` → `test` → `pod install` → `flutter build ios --release --no-codesign` → 打包 → 校验（含「切片必须正好 340 个」）→ 输出 sha256。
+
+自签交给 `codesign`：
+
+```bash
+codesign -f -s "Apple Development: you@example.com" \
+  --entitlements Runner.entitlements Payload/Runner.app
+```
 
 ---
 
