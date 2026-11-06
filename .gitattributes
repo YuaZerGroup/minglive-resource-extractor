@@ -1,0 +1,10 @@
+# Git LFS: the built-in slice heads are large binary blobs (~364 MiB total,
+# 340 files). Tracking them through LFS keeps ordinary clones small while the
+# full payload stays part of the repository history.
+*.part filter=lfs diff=lfs merge=lfs -text
+# Never normalise line endings in binary payloads.
+*.ipa binary
+*.png binary
+*.jpg binary
+*.mp3 binary
+*.mp4 binary
