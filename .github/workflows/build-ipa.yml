@@ -3,15 +3,16 @@ name: Build unsigned IPA
 # NOTE ON RUNNERS
 # --------------
 # An iOS `.app` bundle can only be produced by Apple's toolchain, so this
-# workflow requires a macOS runner. Public/`macos-*` hosted runners are subject
-# to the account's macOS minute quota; when that quota is unavailable the job is
-# cancelled before any step runs (the run shows `steps: []` and an empty
-# runner_name).
+# workflow requires a macOS runner.
+#
+# `macos-14` was observed to be unusable for this account: the job is cancelled
+# before allocation (`runner_name` empty, `steps: []`, empty log archive) while
+# `macos-latest` and `macos-15` on the very same run succeed. The default below
+# is therefore `macos-latest`.
 #
 # `MACOS_RUNNER` lets the build target a self-hosted macOS machine instead:
 #   Settings -> Secrets and variables -> Actions -> Variables
 #   MACOS_RUNNER = self-hosted   (label of a registered macOS runner)
-# Leave it unset to use the hosted `macos-14` image.
 
 on:
   push:
@@ -31,7 +32,7 @@ concurrency:
 jobs:
   build:
     name: Build Runner.app and package unsigned IPA
-    runs-on: ${{ vars.MACOS_RUNNER || 'macos-14' }}
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-latest' }}
     timeout-minutes: 120
     env:
       FLUTTER_VERSION: ${{ inputs.flutter_version || '3.24.5' }}
