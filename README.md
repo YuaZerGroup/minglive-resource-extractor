@@ -229,23 +229,32 @@ Actions → Build unsigned IPA → Run workflow
 
 产物：`MingLiveExtractor-unsigned.ipa` + `.sha256`，**未签名**，自签你自己来。
 
-- 运行器：`macos-14`（可用仓库变量 `MACOS_RUNNER` 改成 self-hosted 标签）
+- 运行器：**`macos-15`（硬编码，不用 `macos-latest` 别名）**
 - Flutter：`3.24.5`（可 `workflow_dispatch` 时改）
 - 构建命令：`flutter build ios --release --no-codesign`
 - 打包：`Payload/Runner.app` → zip → `.ipa`
 - 校验步骤会检查 binary 存在、切片数量必须等于 340、签名状态
 
-> **关于 macOS runner 配额**
+> **为什么钉死 `macos-15`**
 >
-> iOS 的 `.app` 只能由 Apple 工具链产出，所以这个 workflow 必须跑在 macOS 上。`macos-*` 托管镜像受账户 macOS 分钟配额限制，配额不可用时作业会在**任何步骤执行前**被取消——表现就是 `conclusion: cancelled`、`runner_name` 为空、`steps: []`、日志 zip 只有一个空 `PK` 头。
+> 两条理由，都是实测来的：
 >
-> 实测过同一份 workflow：`ubuntu-latest` 作业正常拿到 runner 并成功，`macos-14` 作业被取消。所以看到这类取消不是构建失败，是配额/账单问题。
+> 1. **`macos-latest` 是会漂移的别名**。GitHub 会不定期把 `-latest` 指向新的镜像版本，今天能过的构建明天可能悄悄换到另一个 macOS/Xcode 组合上，出问题还找不着原因。构建环境必须钉死。
 >
-> 两条出路：
-> 1. 给自己的 macOS 机器注册 self-hosted runner，把仓库变量 `MACOS_RUNNER` 设成它的标签
-> 2. 直接在 Mac 上本地构建（见方式 B）
+> 2. **`macos-14` 在这个账号上根本不可用**。用一次四标签矩阵探针在同一次 run 里验证：
+>
+> | 标签 | 结果 | runner |
+> |---|---|---|
+> | `macos-latest` | ✅ success | `GitHub Actions 1000000607` |
+> | `macos-15` | ✅ success | `GitHub Actions 1000000608` |
+> | `macos-14` | ❌ cancelled | 空 |
+> | `macos-13` | ⏳ 排队 | — |
+>
+> `macos-14` 的失败特征：`runner_name` 为空、`steps: []`、日志 zip 只有一个空 `PK` 头、2 秒结束。**一个步骤都没跑**，所以这不是构建失败，是机器压根没分配下来。
+>
+> 结论：钉 `macos-15`。workflow 里加了 `Assert runner image` 步骤，如果哪天 runner 报的 macOS 主版本不是 15，会直接 `::error::` 失败，不会拿错镜像的产物糊弄你。
 
-**方式 B：本地一键出包（推荐，绕开配额）**
+**方式 B：本地一键出包**
 
 ```bash
 ./tool/build-ipa.sh                 # 完整构建 + 打包

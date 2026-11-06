@@ -5,14 +5,14 @@ name: Build unsigned IPA
 # An iOS `.app` bundle can only be produced by Apple's toolchain, so this
 # workflow requires a macOS runner.
 #
-# `macos-14` was observed to be unusable for this account: the job is cancelled
-# before allocation (`runner_name` empty, `steps: []`, empty log archive) while
-# `macos-latest` and `macos-15` on the very same run succeed. The default below
-# is therefore `macos-latest`.
+# The runner label is pinned to `macos-15` on purpose:
+#   * `macos-latest` is an alias that GitHub re-points over time, so a build
+#     that passes today can silently move to a different image tomorrow.
+#   * `macos-14` is unusable for this account: a four-label matrix probe on a
+#     single run gave macos-latest=success, macos-15=success,
+#     macos-14=cancelled with an empty runner_name and no steps.
 #
-# `MACOS_RUNNER` lets the build target a self-hosted macOS machine instead:
-#   Settings -> Secrets and variables -> Actions -> Variables
-#   MACOS_RUNNER = self-hosted   (label of a registered macOS runner)
+# Pin the image, do not track the alias.
 
 on:
   push:
@@ -32,17 +32,24 @@ concurrency:
 jobs:
   build:
     name: Build Runner.app and package unsigned IPA
-    runs-on: ${{ vars.MACOS_RUNNER || 'macos-latest' }}
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       FLUTTER_VERSION: ${{ inputs.flutter_version || '3.24.5' }}
       FLUTTER_CHANNEL: stable
     steps:
-      - name: Confirm runner platform
+      - name: Assert runner image
         run: |
-          uname -a
-          sw_vers || true
-          xcodebuild -version || true
+          set -euo pipefail
+          echo "expected macOS 15"
+          sw_vers
+          major=$(sw_vers -productVersion | cut -d. -f1)
+          echo "runner macOS major: $major"
+          if [ "$major" != "15" ]; then
+            echo "::error::this workflow is pinned to macos-15 but the runner reports macOS $major"
+            exit 1
+          fi
+          xcodebuild -version
 
       - name: Checkout
         uses: actions/checkout@v4
