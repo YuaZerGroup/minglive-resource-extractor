@@ -59,10 +59,16 @@ jobs:
             exit 1
           fi
           # A pointer file is ~130 bytes; a real slice is much larger.
-          smallest=$(find assets/builtin-slices -name '*.part' -type f -printf '%s\n' \
-            | sort -n | head -n 1)
+          # BSD find (macOS) has no -printf, so use stat with the platform flag.
+          if stat -f '%z' . >/dev/null 2>&1; then
+            SIZEFLAG='-f%z'          # BSD / macOS
+          else
+            SIZEFLAG='-c%s'          # GNU / Linux
+          fi
+          smallest=$(find assets/builtin-slices -name '*.part' -type f -exec stat $SIZEFLAG {} + \
+            | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n | head -n 1)
           echo "smallest slice: ${smallest} bytes"
-          if [ "$smallest" -lt 1000 ]; then
+          if [ -z "${smallest:-}" ] || [ "$smallest" -lt 1000 ]; then
             echo "::error::found LFS pointer files instead of payload; run 'git lfs pull'"
             exit 1
           fi
@@ -94,7 +100,12 @@ jobs:
 
       - name: Install CocoaPods dependencies
         working-directory: ios
-        run: pod install --repo-update
+        run: |
+          if [ -f Podfile.lock ]; then
+            pod install
+          else
+            pod install --repo-update
+          fi
 
       - name: Build iOS release (no codesign)
         run: |
